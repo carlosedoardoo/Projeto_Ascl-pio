@@ -1,0 +1,77 @@
+-- Verificar se o CPF já existe na tabela 'pacientes'
+SELECT cpf FROM pacientes WHERE cpf = %s;
+
+-- Inserir novo paciente na tabela 'pacientes'
+INSERT INTO pacientes (nome, telefone, data_nascimento, cpf, email)
+VALUES (%s, %s, %s, %s, %s);
+
+-- 1. Obter especialidade do médico (necessário para tipo_procedimento)
+SELECT especialidade FROM medicos WHERE id_medico = %s;
+
+-- 4. Inserir agendamento
+INSERT INTO consultas (id_paciente, id_medico, data_consulta, horario_consulta, tipo_procedimento)
+VALUES (%s, %s, %s, %s, %s);
+
+-- Consulta com JOINs para pegar nomes do paciente e médico, e especialidade
+SELECT
+    c.id_consulta,
+    p.nome AS nome_paciente,
+    m.nome AS nome_medico,
+    m.especialidade,
+    c.data_consulta,
+    c.horario_consulta,
+    c.tipo_procedimento
+FROM consultas c
+JOIN pacientes p ON c.id_paciente = p.id_paciente
+JOIN medicos m ON c.id_medico = m.id_medico
+ORDER BY c.data_consulta, c.horario_consulta;
+
+-- Primeiro, verificar se a consulta existe para dar um feedback melhor
+SELECT id_consulta FROM consultas WHERE id_consulta = %s;
+
+-- Excluir agendamento
+DELETE FROM consultas WHERE id_consulta = %s;
+
+-- Obter pacientes para dropdown
+SELECT id_paciente, nome, cpf FROM pacientes ORDER BY nome;
+
+-- Obter médicos para dropdown
+SELECT id_medico, nome, especialidade, crm FROM medicos ORDER BY nome;
+
+-- Retornar os detalhes de um paciente específico
+SELECT id_paciente, nome, cpf, data_nascimento FROM pacientes WHERE id_paciente = %s;
+
+-- Retornar todas as consultas de um paciente, ordenadas por data e hora.
+SELECT
+    c.id_consulta,
+    c.data_consulta,
+    c.horario_consulta,
+    c.tipo_procedimento,
+    m.nome AS nome_medico,
+    m.especialidade
+FROM consultas c
+JOIN pacientes p ON c.id_paciente = p.id_paciente
+JOIN medicos m ON c.id_medico = m.id_medico
+WHERE c.id_paciente = %s
+ORDER BY c.data_consulta ASC, c.horario_consulta ASC;
+
+-- Retornar a última consulta de um paciente.
+SELECT
+    c.id_consulta,
+    c.data_consulta,
+    c.horario_consulta,
+    c.tipo_procedimento,
+    m.nome AS nome_medico,
+    m.especialidade
+FROM consultas c
+JOIN medicos m ON c.id_medico = m.id_medico
+WHERE c.id_paciente = %s
+ORDER BY c.data_consulta DESC, c.horario_consulta DESC
+LIMIT 1;
+
+-- Verificar se o CRM já existe (para cadastro de médico)
+SELECT crm FROM medicos WHERE crm = %s;
+
+-- Inserir novo médico
+INSERT INTO medicos (nome, especialidade, telefone, email, crm)
+VALUES (%s, %s, %s, %s, %s);
