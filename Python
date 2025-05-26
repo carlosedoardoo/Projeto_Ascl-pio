@@ -1,0 +1,1365 @@
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image
+import os
+import re
+from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
+import mysql.connector
+from mysql.connector import Error
+import random
+
+# --- Configurações do Banco de Dados MySQL ---
+DB_CONFIG = {
+    'host': 'localhost',
+    'database': '2teste',
+    'user': 'root',
+    'password': 'toor'
+}
+
+def get_db_connection():
+    """Tenta estabelecer uma conexão com o banco de dados MySQL."""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        if conn.is_connected():
+            return conn
+    except Error as e:
+        messagebox.showerror("Erro de Conexão", f"Erro ao conectar ao MySQL: {e}\nVerifique se o servidor MySQL está rodando e as credenciais.")
+        return None
+
+# --- Funções de Validação ---
+def validar_cpf(cpf):
+    """
+    Valida um número de CPF.
+    Remove caracteres não numéricos e verifica a estrutura e dígitos verificadores.
+    """
+    cpf = ''.join(filter(str.isdigit, cpf))
+    if not cpf or len(cpf) != 11 or cpf == cpf[0] * 11:
+        return False
+    for i in range(9, 11):
+        value = sum((int(cpf[num]) * ((i + 1) - num) for num in range(0, i))) % 11
+        digit = 11 - value if value > 1 else 0
+        if digit != int(cpf[i]):
+            return False
+    return True
+
+def validar_email(email):
+    """
+    Valida um endereço de e-mail usando uma expressão regular para domínios específicos.
+    """
+    return re.match(r"^[^@]+@(?:hotmail\.com|gmail\.com|icloud\.com|itc\.com)$", email, re.IGNORECASE)
+
+# --- Funções de Operação de Banco de Dados ---
+
+def cadastrar_paciente_db(nome, telefone, data_nasc_str, cpf, email):
+    """
+    Permite o cadastro de um novo paciente, adaptado para ser chamado da GUI.
+    Retorna (True, "Mensagem de Sucesso") ou (False, "Mensagem de Erro").
+    """
+    # Validações dos dados de entrada
+    if not nome:
+        return False, "Por favor, digite o nome completo."
+    if not (telefone.isdigit() and 10 <= len(telefone) <= 11): # Aceita 10 ou 11 dígitos
+        return False, "Número de telefone inválido. Digite apenas números (10 ou 11 dígitos, incluindo DDD)."
+    if not validar_cpf(cpf):
+        return False, "CPF inválido."
+    if not validar_email(email):
+        return False, 'E-mail incorreto. Apenas domínios hotmail.com, gmail.com, icloud.com ou itc.com são aceitos.'
+
+    try:
+        data_nascimento_obj = datetime.strptime(data_nasc_str, '%d-%m-%Y').date()
+    except ValueError:
+        try:
+            data_nascimento_obj = datetime.strptime(data_nasc_str, '%d/%m/%Y').date()
+        except ValueError:
+            return False, "Formato de data de nascimento inválido. Use DD-MM-AAAA ou DD/MM/AAAA."
+
+    hoje = date.today()
+    idade = relativedelta(hoje, data_nascimento_obj).years
+    if idade >= 100:
+        return False, "A idade do paciente não pode ser igual ou superior a 100 anos."
+    if data_nascimento_obj > hoje:
+        return False, "Data de nascimento não pode ser uma data futura."
+
+    data_nasc_db_format = data_nascimento_obj.strftime('%Y-%m-%d') # Formato AAAA-MM-DD para o tipo DATE no MySQL
+
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+
+    try:
+        cursor = conn.cursor()
+
+        # Verificar se o CPF já existe na tabela 'pacientes'
+        cursor.execute("SELECT cpf FROM pacientes WHERE cpf = %s", (cpf,))
+        if cursor.fetchone():
+            return False, f"Erro: CPF {cpf} já cadastrado no sistema."
+
+        # Inserir novo paciente na tabela 'pacientes'
+        sql = """
+            INSERT INTO pacientes (nome, telefone, data_nascimento, cpf, email)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        cursor.execute(sql, (nome, telefone, data_nascimento_obj, cpf, email))
+        conn.commit()
+        return True, 'Paciente cadastrado com sucesso no MySQL!'
+    except Error as e:
+        return False, f"Erro ao salvar paciente no MySQL: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def agendar_consulta_db(id_paciente, id_medico, data_consulta_str, horario_consulta_str):
+    """
+    Adaptação de agendar_consulta para a GUI.
+    Retorna (True, "Mensagem de Sucesso") ou (False, "Mensagem de Erro").
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+
+    try:
+        cursor = conn.cursor(dictionary=True) # Retorna resultados como dicionários para facilitar o acesso
+
+        # 1. Obter especialidade do médico (necessário para tipo_procedimento)
+        cursor.execute("SELECT especialidade FROM medicos WHERE id_medico = %s", (id_medico,))
+        medico_info = cursor.fetchone()
+        if not medico_info:
+            return False, "ID de médico inválido."
+        especialidade_medico = medico_info['especialidade']
+
+        # 2. Validar Data da Consulta
+        try:
+            data_consulta_obj = datetime.strptime(data_consulta_str, '%d-%m-%Y').date()
+        except ValueError:
+            try:
+                data_consulta_obj = datetime.strptime(data_consulta_str, '%d/%m/%Y').date()
+            except ValueError:
+                return False, "Formato de data de consulta inválido. Use DD-MM-AAAA ou DD/MM/AAAA."
+
+        hoje = date.today()
+        # A consulta deve ser agendada a partir do dia seguinte até no máximo 5 dias no futuro
+        if not (hoje < data_consulta_obj <= hoje + timedelta(days=5)):
+            return False, f"A consulta deve ser agendada para uma data futura, no máximo até { (hoje + timedelta(days=5)).strftime('%d-%m-%Y') }."
+
+        data_consulta_db_format = data_consulta_obj.strftime('%Y-%m-%d') # Formato AAAA-MM-DD para MySQL DATE
+
+        # 3. Validar Horário da Consulta
+        try:
+            datetime.strptime(horario_consulta_str, '%H:%M').time() # Apenas valida o formato
+        except ValueError:
+            return False, "Formato de horário inválido. Use o formato HH:MM (ex: 09:00)."
+
+        # 4. Inserir agendamento
+        sql_insert_consulta = """
+            INSERT INTO consultas (id_paciente, id_medico, data_consulta, horario_consulta, tipo_procedimento)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        cursor.execute(sql_insert_consulta, (id_paciente, id_medico, data_consulta_db_format, horario_consulta_str, especialidade_medico))
+        conn.commit()
+
+        return True, "Consulta agendada com sucesso!"
+
+    except Error as e:
+        return False, f"Erro durante o agendamento de consulta no MySQL: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def listar_agendamentos_db():
+    """
+    Retorna uma lista de dicionários com os agendamentos ou (False, "Mensagem de Erro").
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+
+    try:
+        cursor = conn.cursor(dictionary=True) # Retorna resultados como dicionários
+        # Consulta com JOINs para pegar nomes do paciente e médico, e especialidade
+        sql = """
+            SELECT
+                c.id_consulta,
+                p.nome AS nome_paciente,
+                m.nome AS nome_medico,
+                m.especialidade,
+                c.data_consulta,
+                c.horario_consulta,
+                c.tipo_procedimento
+            FROM consultas c
+            JOIN pacientes p ON c.id_paciente = p.id_paciente
+            JOIN medicos m ON c.id_medico = m.id_medico
+            ORDER BY c.data_consulta, c.horario_consulta
+        """
+        cursor.execute(sql)
+        consultas = cursor.fetchall()
+        return True, consultas
+    except Error as e:
+        return False, f"Erro ao ler agendamentos do MySQL: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def cancelar_agendamento_db(id_consulta):
+    """
+    Cancela uma consulta. Retorna (True, "Mensagem de Sucesso") ou (False, "Mensagem de Erro").
+    """
+    if not id_consulta:
+        return False, "ID da consulta não pode ser vazio."
+
+    try:
+        id_consulta = int(id_consulta)
+    except ValueError:
+        return False, "ID da consulta deve ser um número inteiro."
+
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+
+    try:
+        cursor = conn.cursor()
+        # Primeiro, verificar se a consulta existe para dar um feedback melhor
+        cursor.execute("SELECT id_consulta FROM consultas WHERE id_consulta = %s", (id_consulta,))
+        if not cursor.fetchone():
+            return False, f"Consulta com ID {id_consulta} não encontrada."
+
+        sql_delete = "DELETE FROM consultas WHERE id_consulta = %s"
+        cursor.execute(sql_delete, (id_consulta,))
+        conn.commit()
+        return True, f"Consulta ID {id_consulta} cancelada com sucesso!"
+    except Error as e:
+        return False, f"Erro ao cancelar consulta no MySQL: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# --- Funções para obter dados auxiliares para ComboBoxes, etc. ---
+def get_pacientes_for_dropdown():
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id_paciente, nome, cpf FROM pacientes ORDER BY nome")
+        pacientes = cursor.fetchall()
+        return pacientes
+    except Error as e:
+        messagebox.showerror("Erro", f"Erro ao carregar pacientes: {e}")
+        return []
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def get_medicos_for_dropdown():
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        cursor = conn.cursor(dictionary=True)
+        # Adicione o CRM na seleção para que possa ser exibido na combobox (opcional)
+        cursor.execute("SELECT id_medico, nome, especialidade, crm FROM medicos ORDER BY nome")
+        medicos = cursor.fetchall()
+        return medicos
+    except Error as e:
+        messagebox.showerror("Erro", f"Erro ao carregar médicos: {e}")
+        return []
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# --- NOVAS FUNÇÕES PARA O PRONTUÁRIO ELETRÔNICO ---
+
+def get_paciente_details_db(id_paciente):
+    """Retorna os detalhes de um paciente específico."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id_paciente, nome, cpf, data_nascimento FROM pacientes WHERE id_paciente = %s", (id_paciente,))
+        return cursor.fetchone()
+    except Error as e:
+        print(f"Erro ao buscar detalhes do paciente: {e}")
+        return None
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def get_paciente_consultas_db(id_paciente):
+    """
+    Retorna todas as consultas de um paciente, ordenadas por data e hora.
+    Inclui informações do médico e o tipo de procedimento.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+    try:
+        cursor = conn.cursor(dictionary=True)
+        sql = """
+            SELECT
+                c.id_consulta,
+                c.data_consulta,
+                c.horario_consulta,
+                c.tipo_procedimento,
+                m.nome AS nome_medico,
+                m.especialidade
+            FROM consultas c
+            JOIN pacientes p ON c.id_paciente = p.id_paciente
+            JOIN medicos m ON c.id_medico = m.id_medico
+            WHERE c.id_paciente = %s
+            ORDER BY c.data_consulta ASC, c.horario_consulta ASC
+        """
+        cursor.execute(sql, (id_paciente,))
+        consultas = cursor.fetchall()
+        return True, consultas
+    except Error as e:
+        return False, f"Erro ao buscar consultas do paciente: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def get_ultima_consulta_db(id_paciente):
+    """
+    Retorna a última consulta de um paciente.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados."
+    try:
+        cursor = conn.cursor(dictionary=True)
+        sql = """
+            SELECT
+                c.id_consulta,
+                c.data_consulta,
+                c.horario_consulta,
+                c.tipo_procedimento,
+                m.nome AS nome_medico,
+                m.especialidade
+            FROM consultas c
+            JOIN medicos m ON c.id_medico = m.id_medico
+            WHERE c.id_paciente = %s
+            ORDER BY c.data_consulta DESC, c.horario_consulta DESC
+            LIMIT 1
+        """
+        cursor.execute(sql, (id_paciente,))
+        ultima_consulta = cursor.fetchone()
+        return True, ultima_consulta
+    except Error as e:
+        return False, f"Erro ao buscar última consulta do paciente: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# --- Listas de Medicamentos ---
+MEDICAMENTOS_CIRURGIA = [
+    "Propofol", "Sevorano", "Fentanil", "Rocurônio", "Atracúrio",
+    "Midazolam", "Ephedrina", "Fenilefrina", "Ondansetrona", "Cefazolina",
+    "Ácido Tranexâmico", "Morfina", "Dexametasona", "Norepinefrina"
+]
+
+MEDICAMENTOS_POS_CIRURGICO = [
+    "Paracetamol", "Dipirona", "Tramadol", "Diclofenaco", "Cetoprofeno",
+    "Ibuprofeno", "Ondansetrona", "Omeprazol", "Enoxaparina", "Macrogol",
+    "Cefalexina", "Metoclopramida", "Domperidona", "Prednisona"
+]
+
+MEDICAMENTOS_CLINICOS_GERAIS = [
+    "Amoxicilina", "Dipirona", "Ibuprofeno", "Paracetamol", "Omeprazol",
+    "Losartana", "Captopril", "Sinvastatina", "Cloridrato de Fluoxetina",
+    "Bromoprida", "Buscopan Composto", "Cloreto de Sódio 0,9%",
+    "Anlodipino", "Metformina", "Levotiroxina"
+]
+
+# --- Função para Gerar CRM (NOVA) ---
+def generate_crm():
+    """Gera um número de CRM aleatório de 6 dígitos."""
+    return str(random.randint(100000, 999999))
+
+# --- NOVIDADE: Tabela de Dias de Alta (Variável) ---
+# O paciente receberá alta entre 1 e 15 dias após o procedimento.
+DIAS_DE_ALTA_CIRURGIA = list(range(1, 16)) # De 1 a 15 dias
+
+def simular_detalhes_consulta(tipo_procedimento, data_consulta):
+    """
+    Simula detalhes e acontecimentos de uma consulta/procedimento,
+    agora com a alta aleatória baseada na data do procedimento.
+    """
+    motivo = "Diagnóstico não especificado"
+    cirurgia_procedimento = "Nenhum procedimento registrado"
+    acontecimentos = []
+    medicamentos_usados = []
+    
+    # Define uma data base para o cálculo da alta
+    # Para procedimentos cirúrgicos, a data da cirurgia é a base.
+    # Para consultas clínicas, a "alta" é no mesmo dia.
+    data_base_alta = data_consulta 
+    alta_data = data_base_alta
+
+    tipo_procedimento_lower = tipo_procedimento.lower()
+
+    # --- Procedimentos Cirúrgicos/Hospitalares ---
+    if "apendicite" in tipo_procedimento_lower or "hérnia" in tipo_procedimento_lower or \
+       "pedras nos rins" in tipo_procedimento_lower or "cálculo renal" in tipo_procedimento_lower or \
+       "tireoidectomia" in tipo_procedimento_lower or "nódulo na tireoide" in tipo_procedimento_lower or \
+       "colecistectomia" in tipo_procedimento_lower or "vesícula biliar" in tipo_procedimento_lower or \
+       "artroplastia de joelho" in tipo_procedimento_lower or "substituição de joelho" in tipo_procedimento_lower or \
+       "cateterismo cardíaco" in tipo_procedimento_lower or "angioplastia" in tipo_procedimento_lower or \
+       "histerectomia" in tipo_procedimento_lower or "retirada de útero" in tipo_procedimento_lower:
+
+        # Gerar dias de alta aleatórios entre 1 e 15 dias para cirurgias
+        dias_internacao = random.choice(DIAS_DE_ALTA_CIRURGIA)
+        alta_data = data_base_alta + timedelta(days=dias_internacao)
+        
+        # Simula a data de internação (pode ser no mesmo dia ou 1 dia antes da cirurgia)
+        data_internacao_sim = data_consulta if random.random() < 0.8 else data_consulta - timedelta(days=1)
+
+
+        if "apendicite" in tipo_procedimento_lower:
+            motivo = "Apendicite (inflamação do apêndice)"
+            cirurgia_procedimento = "Retirada do apêndice (Apendicectomia)"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente deu entrada com dor forte na parte inferior direita da barriga, náuseas e febre. Exames confirmaram apendicite e foi preparada para cirurgia de emergência.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: No mesmo dia (ou dia seguinte), o paciente fez a cirurgia para remover o apêndice. O procedimento ocorreu bem.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório: Acordou bem, com dor leve controlada. Iniciou dieta líquida e deambulação precoce.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Paciente em bom estado geral, sem intercorrências, recebeu alta com orientações e prescrição de analgésicos.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(4, 7)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(3, 5)))
+
+        elif "hérnia" in tipo_procedimento_lower:
+            motivo = "Hérnia Inguinal"
+            cirurgia_procedimento = "Correção de Hérnia (Hernioplastia)"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente internou para correção de hérnia inguinal que causava desconforto. Exames pré-cirúrgicos e preparo.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Hernioplastia realizada com sucesso, com colocação de tela. Procedimento sem intercorrências.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório: Paciente estável, com dor controlada. Estimulado a deambular.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Recebeu alta com orientações de repouso relativo e cuidados com a ferida operatória.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(3, 6)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(2, 4)))
+
+        elif "pedras nos rins" in tipo_procedimento_lower or "cálculo renal" in tipo_procedimento_lower or "ureteroscopia" in tipo_procedimento_lower:
+            motivo = "Cálculo Renal Obstrutivo"
+            cirurgia_procedimento = "Retirada de Cálculo Renal (Ureteroscopia)"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente admitido com dor intensa em flanco devido a cálculo renal obstrutivo. Preparado para ureteroscopia.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Procedimento: Ureteroscopia realizada com sucesso, fragmentação e retirada do cálculo. Inserção de cateter duplo J (se aplicável).")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Procedimento: Melhora da dor, paciente com diurese presente. Monitorização de sinais vitais.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Paciente estável, com orientações sobre hidratação e retorno para retirada de cateter (se necessário).")
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_CIRURGIA if "fentanil" in m.lower() or "midazolam" in m.lower()], k=random.randint(2, 4)))
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_POS_CIRURGICO if "paracetamol" in m.lower() or "diclofenaco" in m.lower() or "tramadol" in m.lower()], k=random.randint(2, 4)))
+
+        elif "nódulo na tireoide" in tipo_procedimento_lower or "tireoidectomia" in tipo_procedimento_lower:
+            motivo = "Nódulo Tireoidiano com Indicação Cirúrgica"
+            cirurgia_procedimento = "Tireoidectomia Total ou Parcial"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente internou para tireoidectomia devido a nódulo com características suspeitas. Realizados exames pré-operatórios.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Tireoidectomia realizada com sucesso. Hemostasia adequada e integridade das paratireoides e nervo laríngeo recorrente preservadas.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório: Paciente acordado, voz normal, sem sinais de hipocalcemia. Dreno cervical com baixo débito.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Recebeu alta com orientações sobre uso de levotiroxina (se aplicável), cuidados com a incisão e sinais de alerta.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(4, 6)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(3, 5)))
+
+        elif "colecistectomia" in tipo_procedimento_lower or "vesícula biliar" in tipo_procedimento_lower:
+            motivo = "Colelitíase Sintomática / Colecistite"
+            cirurgia_procedimento = "Colecistectomia Laparoscópica"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente admitido com dor abdominal em hipocôndrio direito, náuseas e vômitos. Diagnóstico de colelitíase. Indicado colecistectomia.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Colecistectomia laparoscópica realizada. Identificação e ligadura do ducto cístico e artéria cística. Vesícula removida com sucesso.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório: Paciente estável, com dor controlada. Iniciou dieta líquida e deambulação precoce.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Recebeu alta com orientações de dieta, atividade física e cuidados com os portais da laparoscopia.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(5, 8)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(4, 6)))
+
+        elif "artroplastia de joelho" in tipo_procedimento_lower or "substituição de joelho" in tipo_procedimento_lower:
+            motivo = "Osteoartrite Severa de Joelho (Gonartrose)"
+            cirurgia_procedimento = "Artroplastia Total de Joelho"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente internou para artroplastia total de joelho devido a osteoartrite avançada. Preparo pré-operatório, incluindo avaliação anestésica.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Artroplastia de joelho realizada com sucesso. Implante de prótese de joelho. Hemostasia rigorosa e fechamento por planos.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório Imediato: Paciente em recuperação, dor controlada com analgesia potente. Início de mobilização passiva contínua (CPM) do joelho.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=2)).strftime('%d/%m')} - Fisioterapia: Início da fisioterapia intensiva, com exercícios de ganho de amplitude de movimento e fortalecimento. Deambulação com andador.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Paciente recebeu alta com plano de reabilitação ambulatorial, prescrição de medicamentos e orientações de cuidados com a ferida operatória.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(6, 9)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(5, 7)))
+
+        elif "cateterismo cardíaco" in tipo_procedimento_lower or "angioplastia" in tipo_procedimento_lower:
+            motivo = "Síndrome Coronariana Aguda / Doença Arterial Coronariana"
+            cirurgia_procedimento = "Cateterismo Cardíaco / Angioplastia com Stent"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente admitido com dor torácica típica/atípica. Eletrocardiograma e enzimas cardíacas com alterações. Indicado cateterismo.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Procedimento: Cateterismo cardíaco realizado, revelando estenose coronariana significativa. Realizada angioplastia com implante de stent farmacológico com sucesso.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Procedimento: Paciente estável, sem dor torácica. Local da punção sem hematoma ou sangramento. Monitorização contínua.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Recebeu alta com otimização da terapia antiplaquetária dupla e orientações para mudança de estilo de vida.")
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_CIRURGIA if "fentanil" in m.lower() or "midazolam" in m.lower()], k=random.randint(2, 4)))
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_POS_CIRURGICO if "enoxaparina" in m.lower() or "omeprazol" in m.lower() or "paracetamol" in m.lower()], k=random.randint(3, 5))) # Incluindo mais opções relevantes
+
+        elif "histerectomia" in tipo_procedimento_lower or "retirada de útero" in tipo_procedimento_lower:
+            motivo = "Miomas Uterinos Sintomáticos / Adenomiose / Sangramento Uterino Anormal"
+            cirurgia_procedimento = "Histerectomia (Total ou Subtotal, Abdominal/Vaginal/Laparoscópica)"
+            acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente internou para histerectomia devido a sangramento uterino anormal e anemia. Realizou exames e preparo intestinal (se necessário).")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Histerectomia realizada com sucesso (abordagem especificada: abdominal/laparoscópica/vaginal). Sem intercorrências intraoperatórias.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=1)).strftime('%d/%m')} - Pós-Operatório: Paciente em recuperação, hemodinamicamente estável. Dor controlada com analgesia. Iniciada dieta leve e deambulação precoce.")
+            acontecimentos.append(f"{(data_consulta + timedelta(days=2)).strftime('%d/%m')} - Evolução: Diurese satisfatória, evacuação presente. Sinais vitais estáveis. Evoluindo bem.")
+            acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Paciente recebeu alta com orientações sobre repouso, abstinência sexual temporária e cuidados com a ferida operatória.")
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_CIRURGIA, k=random.randint(5, 8)))
+            medicamentos_usados.extend(random.sample(MEDICAMENTOS_POS_CIRURGICO, k=random.randint(4, 6)))
+
+        elif "cirurgia de catarata" in tipo_procedimento_lower or "facoemulsificação" in tipo_procedimento_lower:
+            motivo = "Catarata (Opacificação do Cristalino)"
+            cirurgia_procedimento = "Facoemulsificação com Implante de LIO"
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Admissão: Paciente admitido para cirurgia de catarata no olho (direito/esquerdo). Preparo pré-operatório ambulatorial.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Cirurgia: Facoemulsificação com implante de lente intraocular realizada com sucesso. Procedimento rápido e sem intercorrências.")
+            acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Alta: Paciente recebeu alta no mesmo dia, com orientações de uso de colírios (antibiótico, anti-inflamatório) e proteção ocular. Agendado retorno.")
+            alta_data = data_consulta # Procedimento ambulatorial, alta no mesmo dia.
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_CLINICOS_GERAIS if "midazolam" in m.lower() or "fentanil" in m.lower() or "ondansetrona" in m.lower()], k=random.randint(1, 3)))
+            medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_POS_CIRURGICO if "diclofenaco" in m.lower() or "paracetamol" in m.lower()], k=random.randint(1, 2))) # Colírios específicos não estão na lista de medicamentos sistêmicos
+
+    # --- Procedimentos Clínicos/Não Cirúrgicos ---
+    elif "infecção urinária" in tipo_procedimento_lower or "pielonefrite" in tipo_procedimento_lower:
+        motivo = "Infecção Urinária Grave (Pielonefrite)"
+        cirurgia_procedimento = "Tratamento Clínico com Antibioticoterapia Venosa"
+        
+        # Para tratamentos clínicos, a internação pode variar um pouco mais
+        dias_internacao = random.randint(3, 7) # Internação de 3 a 7 dias para infecção grave
+        alta_data = data_base_alta + timedelta(days=dias_internacao)
+        data_internacao_sim = data_consulta # Assume internação no dia da consulta/diagnóstico inicial
+
+        acontecimentos.append(f"{data_internacao_sim.strftime('%d/%m')} - Internação: Paciente chegou com febre alta, dor lombar e disúria. Diagnóstico de pielonefrite. Iniciado tratamento com antibióticos intravenosos.")
+        acontecimentos.append(f"{(data_internacao_sim + timedelta(days=1)).strftime('%d/%m')} - Evolução: Melhora da febre e dor. Exames laboratoriais mostrando resposta ao tratamento.")
+        acontecimentos.append(f"{(data_internacao_sim + timedelta(days=dias_internacao - 1)).strftime('%d/%m')} - Preparo para Alta: Paciente afebril por 48h, sem queixas. Orientado sobre antibiótico oral para completar o tratamento.")
+        acontecimentos.append(f"{alta_data.strftime('%d/%m')} - Alta Hospitalar: Recebeu alta com prescrição de antibióticos orais e orientações de hidratação e retorno ambulatorial.")
+        medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_CLINICOS_GERAIS if "amoxicilina" in m.lower() or "cefalexina" in m.lower() or "cloreto" in m.lower() or "dipirona" in m.lower()], k=random.randint(2, 4)))
+        medicamentos_usados.extend(random.sample([m for m in MEDICAMENTOS_POS_CIRURGICO if "ondansetrona" in m.lower() or "paracetamol" in m.lower()], k=random.randint(1, 2)))
+
+    else: # Default para outras especialidades ou consultas gerais
+        motivo = f"Consulta Geral / {tipo_procedimento}"
+        cirurgia_procedimento = "Consulta Clínica / Ambulatorial"
+        acontecimentos.append(f"{data_consulta.strftime('%d/%m')} - Consulta: Realizada consulta de rotina para {tipo_procedimento.lower()}. Avaliação geral do estado de saúde.")
+        acontecimentos.append(f"    - Recomendação: {random.choice(['repouso e hidratação', 'exames de acompanhamento', 'dieta balanceada', 'medicamentos conforme prescrição'])}.")
+        alta_data = data_consulta # Não há "alta" para consultas ambulatoriais simples
+
+        # Garante que medicamentos clínicos gerais sejam usados para consultas gerais
+        medicamentos_usados.extend(random.sample(MEDICAMENTOS_CLINICOS_GERAIS, k=random.randint(1, 3)))
+
+
+    # Remove duplicatas e ordena para exibição
+    medicamentos_usados = sorted(list(set(medicamentos_usados)))
+
+    return {
+        "motivo": motivo,
+        "procedimento": cirurgia_procedimento,
+        # Usar as datas simuladas para internação e procedimento
+        "data_internacao": data_internacao_sim.strftime('%d/%m/%Y') if "Internação" in "".join(acontecimentos) else "N/A",
+        "data_procedimento": data_consulta.strftime('%d/%m/%Y'), # Assume que a consulta é a data do procedimento principal ou atendimento
+        "alta": alta_data.strftime('%d/%m/%Y'),
+        "acontecimentos": acontecimentos,
+        "medicamentos_usados": medicamentos_usados
+    }
+
+
+# --- Interface Gráfica CustomTkinter ---
+
+# --- Configurações Iniciais do CustomTkinter ---
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Sistema Clínico Cirúrgico")
+        self.geometry("1200x700")
+        self.minsize(1000, 600)
+
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.logged_in_username = "Usuário"
+
+        # --- Carregar Ícones ---
+        self.current_path = os.path.dirname(os.path.realpath(__file__))
+        self.icons = {}
+        icon_names = [
+            "user_icon.png", "info_icon.png", "menu_icon.png", "search_icon.png",
+            "agenda_icon.png", "cadastros_icon.png", "prontuario_icon.png",
+            "movimentacao_icon.png", "relatorios_icon.png",
+            "config_icon.png", "logs_icon.png",
+            "patient_add_icon.png",
+            "schedule_add_icon.png",
+            "schedule_list_icon.png",
+            "cancel_icon.png",
+            "movement_icon.png",
+            "medical_record_icon.png",
+            "report_icon.png",
+            "settings_icon.png",
+            "logs_icon.png",
+        ]
+        for name in icon_names:
+            try:
+                size = (40, 40) if name in ["patient_add_icon.png", "schedule_add_icon.png", "schedule_list_icon.png", "cancel_icon.png", "movement_icon.png", "medical_record_icon.png", "report_icon.png", "settings_icon.png", "logs_icon.png"] else (20, 20)
+                self.icons[name.replace(".png", "_img")] = ctk.CTkImage(Image.open(os.path.join(self.current_path, "icons", name)), size=size)
+            except FileNotFoundError:
+                print(f"AVISO: Ícone '{name}' não encontrado. Usando fallback.")
+                self.icons[name.replace(".png", "_img")] = None
+
+        # --- Frame para o Título e Subtítulo do Sistema (FIXO NO TOPO) ---
+        self.system_title_frame = ctk.CTkFrame(self, fg_color="#1a2d52", corner_radius=0)
+        self.system_title_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.system_title_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self.system_title_frame, text="ASCLEPIUS CLINICAL SYSTEM",
+                     font=("Arial", 24, "bold"), text_color="#E0E0E0").grid(row=0, column=0, pady=(10, 0))
+        ctk.CTkLabel(self.system_title_frame, text="\"Cuidado que transforma, vida que inspira.\"",
+                     font=("Arial", 12, "italic"), text_color="#A0A0A0").grid(row=1, column=0, pady=(0, 10))
+
+        # --- Frames para organização ---
+        self.header_frame = ctk.CTkFrame(self, fg_color="#1a2d52", corner_radius=0)
+        self.header_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        self.header_frame.grid_columnconfigure(0, weight=1)
+        self.header_frame.grid_columnconfigure(1, weight=0)
+
+        self.main_content_frame = ctk.CTkFrame(self, fg_color="#101e3d", corner_radius=0)
+        self.main_content_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
+        self.main_content_frame.grid_rowconfigure(0, weight=0)
+        self.main_content_frame.grid_rowconfigure(1, weight=1)
+        self.main_content_frame.grid_columnconfigure(0, weight=1)
+
+        self.current_tab = "funcoes"
+        self.current_view = None
+        self.current_cards = []
+
+        self.create_login_screen()
+
+    def load_image(self, image_name, size):
+        try:
+            return ctk.CTkImage(Image.open(os.path.join(self.current_path, "icons", image_name)), size=size)
+        except FileNotFoundError:
+            return None
+
+    def clear_frame(self, frame):
+        """Destrói todos os widgets em um frame."""
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+    def create_login_screen(self):
+        self.system_title_frame.grid_remove()
+        self.header_frame.grid_remove()
+
+        self.clear_frame(self.main_content_frame)
+        self.main_content_frame.grid_rowconfigure(0, weight=1)
+        self.main_content_frame.grid_columnconfigure(0, weight=1)
+
+        login_frame = ctk.CTkFrame(self.main_content_frame, fg_color="#1a2d52", corner_radius=10, width=400, height=300)
+        login_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        ctk.CTkLabel(login_frame, text="Login da Recepcionista", font=("Arial", 20, "bold"), text_color="white").pack(pady=20)
+
+        ctk.CTkLabel(login_frame, text="Usuário:", font=("Arial", 14), text_color="white").pack(pady=(10, 0))
+        self.user_entry = ctk.CTkEntry(login_frame, width=250, placeholder_text="Digite seu usuário", font=("Arial", 12))
+        self.user_entry.pack(pady=5)
+        self.user_entry.focus_set()
+
+        ctk.CTkLabel(login_frame, text="Senha:", font=("Arial", 14), text_color="white").pack(pady=(10, 0))
+        self.pass_entry = ctk.CTkEntry(login_frame, width=250, show="*", placeholder_text="Digite sua senha", font=("Arial", 12))
+        self.pass_entry.pack(pady=5)
+        self.pass_entry.bind("<Return>", lambda event: self.attempt_login())
+
+        login_button = ctk.CTkButton(login_frame, text="Entrar", command=self.attempt_login, font=("Arial", 14, "bold"), fg_color="#4CAF50", hover_color="#45a049")
+        login_button.pack(pady=20, ipadx=10, ipady=5)
+
+    def attempt_login(self):
+        user = self.user_entry.get()
+        password = self.pass_entry.get()
+
+        if user and password:
+            messagebox.showinfo("Login", "Login simulado com sucesso! Acesso concedido.")
+            self.logged_in_username = user
+            self.show_main_menu()
+        else:
+            messagebox.showwarning("Login", "Por favor, insira usuário e senha.")
+
+    def show_main_menu(self):
+        self.system_title_frame.grid()
+        self.header_frame.grid()
+
+        self.current_view = "dashboard"
+        self.clear_frame(self.main_content_frame)
+        self.main_content_frame.grid_rowconfigure(0, weight=0)
+        self.main_content_frame.grid_rowconfigure(1, weight=1)
+        self.main_content_frame.grid_columnconfigure(0, weight=1)
+
+        self.create_header(self.logged_in_username)
+        self.create_dashboard_content()
+
+    def create_header(self, username="Usuário"):
+        self.clear_frame(self.header_frame)
+
+        ctk.CTkLabel(self.header_frame, text="", fg_color="transparent").grid(row=0, column=0, sticky="ew")
+
+        user_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        user_frame.grid(row=0, column=1, padx=20, pady=10, sticky="e")
+        user_frame.grid_columnconfigure((0,1,2,3), weight=0)
+
+        user_icon_img = self.icons.get("user_icon_img")
+        if user_icon_img:
+            ctk.CTkLabel(user_frame, image=user_icon_img, text="").grid(row=0, column=0, padx=(0,5))
+        else:
+            ctk.CTkLabel(user_frame, text="👤", font=("Arial", 16), text_color="white").grid(row=0, column=0, padx=(0,5))
+
+        ctk.CTkLabel(user_frame, text=username, font=("Arial", 14, "bold"), text_color="white").grid(row=0, column=1, padx=(0,15))
+
+        info_icon_img = self.icons.get("info_icon_img")
+        if info_icon_img:
+            ctk.CTkButton(user_frame, image=info_icon_img, text="", width=30, height=30, fg_color="transparent", hover_color="#2b3e6e").grid(row=0, column=2, padx=(0,5))
+        else:
+            ctk.CTkButton(user_frame, text="i", width=30, height=30, fg_color="transparent", hover_color="#2b3e6e", font=("Arial", 16)).grid(row=0, column=2, padx=(0,5))
+
+        menu_icon_img = self.icons.get("menu_icon_img")
+        if menu_icon_img:
+            ctk.CTkButton(user_frame, image=menu_icon_img, text="", width=30, height=30, fg_color="transparent", hover_color="#2b3e6e", command=self.confirm_logout).grid(row=0, column=3, padx=(0,5))
+        else:
+            ctk.CTkButton(user_frame, text="☰", width=30, height=30, fg_color="transparent", hover_color="#2b3e6e", font=("Arial", 16), command=self.confirm_logout).grid(row=0, column=3, padx=(0,5))
+
+    def confirm_logout(self):
+        if messagebox.askyesno("Sair", "Deseja realmente sair do sistema?"):
+            self.logged_in_username = "Usuário"
+            self.create_login_screen()
+
+    def create_dashboard_content(self):
+        self.clear_frame(self.main_content_frame)
+        self.main_content_frame.grid_columnconfigure((0,1,2,3), weight=1)
+        self.main_content_frame.grid_rowconfigure(1, weight=1)
+
+        search_and_tabs_frame = ctk.CTkFrame(self.main_content_frame, fg_color="transparent")
+        search_and_tabs_frame.grid(row=0, column=0, columnspan=4, sticky="ew", padx=50, pady=(20, 20))
+        search_and_tabs_frame.grid_columnconfigure((0,1,2), weight=1)
+
+        search_entry_frame = ctk.CTkFrame(search_and_tabs_frame, fg_color="#1a2d52", height=40, corner_radius=8)
+        search_entry_frame.grid(row=0, column=0, sticky="ew", padx=(0,10))
+        search_entry_frame.grid_columnconfigure(0, weight=0)
+        search_entry_frame.grid_columnconfigure(1, weight=1)
+
+        search_icon_img = self.icons.get("search_icon_img")
+        if search_icon_img:
+            ctk.CTkLabel(search_entry_frame, image=search_icon_img, text="", fg_color="transparent").grid(row=0, column=0, padx=(15, 0), pady=8)
+        else:
+            ctk.CTkLabel(search_entry_frame, text="🔍", font=("Arial", 16), fg_color="transparent", text_color="white").grid(row=0, column=0, padx=(15, 0), pady=8)
+
+        self.search_entry = ctk.CTkEntry(search_entry_frame, placeholder_text="Pesquisar...",
+                                         fg_color="transparent", border_width=0,
+                                         font=("Arial", 14), text_color="white")
+        self.search_entry.grid(row=0, column=1, sticky="ew", padx=(0,15), pady=8)
+        self.search_entry.bind("<KeyRelease>", self.filter_modules)
+
+
+        self.funcoes_button = ctk.CTkButton(search_and_tabs_frame, text="Funções", command=lambda: self.select_tab("funcoes"),
+                                            font=("Arial", 14, "bold"), fg_color="#4CAF50", hover_color="#45a049")
+        self.funcoes_button.grid(row=0, column=1, padx=(10,5), sticky="e")
+
+        self.utilitarios_button = ctk.CTkButton(search_and_tabs_frame, text="Utilitários", command=lambda: self.select_tab("utilitarios"),
+                                                font=("Arial", 14, "bold"), fg_color="#007bff", hover_color="#0056b3")
+        self.utilitarios_button.grid(row=0, column=2, padx=(5,0), sticky="w")
+
+        self.modules_frame = ctk.CTkScrollableFrame(self.main_content_frame, fg_color="transparent")
+        self.modules_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=50, pady=(0, 20))
+        self.modules_frame.grid_columnconfigure((0,1,2,3), weight=1) # 4 colunas de módulos
+
+        self.select_tab("funcoes") # Inicialmente mostra as funções
+
+    def select_tab(self, tab_name):
+        self.current_tab = tab_name
+        # Reset colors
+        self.funcoes_button.configure(fg_color="#4CAF50", hover_color="#45a049")
+        self.utilitarios_button.configure(fg_color="#007bff", hover_color="#0056b3")
+
+        # Set active tab color
+        if tab_name == "funcoes":
+            self.funcoes_button.configure(fg_color="#367C39", hover_color="#367C39") # Darker green
+            self.show_funcoes_modules()
+        else: # utilitarios
+            self.utilitarios_button.configure(fg_color="#004d80", hover_color="#004d80") # Darker blue
+            self.show_utilitarios_modules()
+        
+        self.filter_modules() # Aplica o filtro de pesquisa ao mudar de aba
+
+    def filter_modules(self, event=None):
+        search_term = self.search_entry.get().lower()
+        
+        # Determine which set of modules to filter based on the current tab
+        if self.current_tab == "funcoes":
+            all_module_cards = self.create_module_cards_data()["funcoes"]
+        else: # "utilitarios"
+            all_module_cards = self.create_module_cards_data()["utilitarios"]
+
+        self.clear_modules_frame()
+        self.current_cards = [] # Limpa a lista de cards atuais
+
+        row, col = 0, 0
+        for data in all_module_cards:
+            if search_term in data["text"].lower() or search_term == "":
+                card = self.create_module_card(self.modules_frame, data["text"], data["icon"], data["command"])
+                card.grid(row=row, column=col, padx=15, pady=15, sticky="nsew")
+                self.current_cards.append(card) # Adiciona o card criado à lista
+                col += 1
+                if col > 3: # 4 cards por linha
+                    col = 0
+                    row += 1
+        
+        # Atualiza o layout do scrollable frame
+        for r_idx in range(row + 1):
+            self.modules_frame.grid_rowconfigure(r_idx, weight=1)
+        for c_idx in range(4):
+            self.modules_frame.grid_columnconfigure(c_idx, weight=1)
+
+    def create_module_cards_data(self):
+        # Mapeamento dos ícones para as chaves do dicionário self.icons
+        patient_add_icon = self.icons.get("patient_add_icon_img")
+        schedule_add_icon = self.icons.get("schedule_add_icon_img")
+        schedule_list_icon = self.icons.get("schedule_list_icon_img")
+        cancel_icon = self.icons.get("cancel_icon_img")
+        movement_icon = self.icons.get("movement_icon_img")
+        medical_record_icon = self.icons.get("medical_record_icon_img")
+        report_icon = self.icons.get("report_icon_img")
+        settings_icon = self.icons.get("settings_icon_img")
+        logs_icon = self.icons.get("logs_icon_img")
+
+        return {
+            "funcoes": [
+                {"text": "Cadastrar Paciente", "icon": patient_add_icon, "command": self.create_cadastrar_paciente_frame},
+                {"text": "Cadastrar Médico", "icon": patient_add_icon, "command": self.create_cadastrar_medico_frame},
+                {"text": "Agendar Consulta", "icon": schedule_add_icon, "command": self.create_agendar_consulta_frame},
+                {"text": "Listar Agendamentos", "icon": schedule_list_icon, "command": self.create_listar_agendamentos_frame},
+                {"text": "Cancelar Agendamento", "icon": cancel_icon, "command": self.create_cancelar_agendamento_frame},
+                {"text": "Prontuário Eletrônico", "icon": medical_record_icon, "command": self.create_prontuario_eletronico_frame},
+            ],
+            "utilitarios": [
+                {"text": "Movimentação de Pacientes", "icon": movement_icon, "command": self.create_movimentacao_pacientes_frame},
+                {"text": "Relatórios", "icon": report_icon, "command": self.create_relatorios_frame},
+                {"text": "Configurações", "icon": settings_icon, "command": self.create_configuracoes_frame},
+                {"text": "Logs do Sistema", "icon": logs_icon, "command": self.create_logs_sistema_frame},
+            ]
+        }
+
+    def show_funcoes_modules(self):
+        self.clear_modules_frame()
+        self.current_cards = []
+        funcoes_data = self.create_module_cards_data()["funcoes"]
+        row, col = 0, 0
+        for data in funcoes_data:
+            card = self.create_module_card(self.modules_frame, data["text"], data["icon"], data["command"])
+            card.grid(row=row, column=col, padx=15, pady=15, sticky="nsew")
+            self.current_cards.append(card)
+            col += 1
+            if col > 3:
+                col = 0
+                row += 1
+        for r_idx in range(row + 1):
+            self.modules_frame.grid_rowconfigure(r_idx, weight=1)
+        for c_idx in range(4):
+            self.modules_frame.grid_columnconfigure(c_idx, weight=1)
+
+    def show_utilitarios_modules(self):
+        self.clear_modules_frame()
+        self.current_cards = []
+        utilitarios_data = self.create_module_cards_data()["utilitarios"]
+        row, col = 0, 0
+        for data in utilitarios_data:
+            card = self.create_module_card(self.modules_frame, data["text"], data["icon"], data["command"])
+            card.grid(row=row, column=col, padx=15, pady=15, sticky="nsew")
+            self.current_cards.append(card)
+            col += 1
+            if col > 3:
+                col = 0
+                row += 1
+        for r_idx in range(row + 1):
+            self.modules_frame.grid_rowconfigure(r_idx, weight=1)
+        for c_idx in range(4):
+            self.modules_frame.grid_columnconfigure(c_idx, weight=1)
+
+    def clear_modules_frame(self):
+        for widget in self.modules_frame.winfo_children():
+            widget.destroy()
+
+    def create_module_card(self, parent_frame, text, icon_img, command):
+        card_frame = ctk.CTkFrame(parent_frame, fg_color="#1a2d52", corner_radius=10,
+                                  width=200, height=150)
+        card_frame.grid_propagate(False) # Prevents the frame from resizing to its contents
+        card_frame.grid_columnconfigure(0, weight=1)
+        card_frame.grid_rowconfigure(0, weight=1)
+        card_frame.grid_rowconfigure(1, weight=1)
+        
+        # Create a button that fills the entire card_frame
+        card_button = ctk.CTkButton(card_frame, text=text, image=icon_img, compound="top",
+                                    font=("Arial", 16, "bold"), text_color="white",
+                                    fg_color="transparent", hover_color="#2b3e6e",
+                                    command=command)
+        card_button.pack(expand=True, fill="both", padx=10, pady=10) # Pack the button to fill the card
+        return card_frame
+
+    def show_content_frame(self, title):
+        self.clear_frame(self.main_content_frame)
+        self.main_content_frame.grid_rowconfigure(0, weight=0)
+        self.main_content_frame.grid_rowconfigure(1, weight=1)
+        self.main_content_frame.grid_columnconfigure(0, weight=1)
+
+        # Title frame for the specific content
+        title_frame = ctk.CTkFrame(self.main_content_frame, fg_color="#1a2d52", corner_radius=0)
+        title_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        title_frame.grid_columnconfigure(0, weight=1)
+        title_frame.grid_columnconfigure(1, weight=0) # For the back button
+
+        ctk.CTkLabel(title_frame, text=title, font=("Arial", 20, "bold"), text_color="white", justify="left").grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        
+        back_button = ctk.CTkButton(title_frame, text="Voltar ao Dashboard", command=self.show_main_menu,
+                                    font=("Arial", 12), fg_color="#d32f2f", hover_color="#b71c1c")
+        back_button.grid(row=0, column=1, padx=20, pady=10, sticky="e")
+
+        self.content_area_frame = ctk.CTkFrame(self.main_content_frame, fg_color="#101e3d")
+        self.content_area_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=20)
+        self.content_area_frame.grid_columnconfigure(0, weight=1)
+        self.content_area_frame.grid_rowconfigure(0, weight=1)
+
+    def create_cadastrar_paciente_frame(self):
+        self.show_content_frame("Cadastro de Paciente")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=3) # Larger column for entry fields
+
+        form_fields = [
+            ("Nome Completo:", "entry_nome", ""),
+            ("Telefone (DDD)XXXX-XXXX:", "entry_telefone", ""),
+            ("Data de Nascimento (DD-MM-AAAA ou DD/MM/AAAA):", "entry_data_nasc", ""),
+            ("CPF (apenas números):", "entry_cpf", ""),
+            ("E-mail (apenas hotmail.com, gmail.com, icloud.com, itc.com):", "entry_email", "")
+        ]
+
+        self.paciente_entries = {}
+        for i, (label_text, var_name, placeholder) in enumerate(form_fields):
+            ctk.CTkLabel(content_frame, text=label_text, font=("Arial", 14), text_color="white", anchor="w").grid(row=i, column=0, padx=20, pady=10, sticky="w")
+            entry = ctk.CTkEntry(content_frame, width=300, placeholder_text=placeholder, font=("Arial", 12))
+            entry.grid(row=i, column=1, padx=20, pady=10, sticky="ew")
+            self.paciente_entries[var_name] = entry
+        
+        # Adiciona um botão para cadastrar
+        cadastrar_button = ctk.CTkButton(content_frame, text="Cadastrar Paciente", command=self._cadastrar_paciente_action,
+                                        font=("Arial", 16, "bold"), fg_color="#4CAF50", hover_color="#45a049")
+        cadastrar_button.grid(row=len(form_fields), column=0, columnspan=2, pady=20, padx=20)
+
+    def _cadastrar_paciente_action(self):
+        nome = self.paciente_entries["entry_nome"].get()
+        telefone = self.paciente_entries["entry_telefone"].get()
+        data_nasc_str = self.paciente_entries["entry_data_nasc"].get()
+        cpf = self.paciente_entries["entry_cpf"].get()
+        email = self.paciente_entries["entry_email"].get()
+
+        success, message = cadastrar_paciente_db(nome, telefone, data_nasc_str, cpf, email)
+        if success:
+            messagebox.showinfo("Sucesso", message)
+            # Limpar campos após o cadastro
+            for entry in self.paciente_entries.values():
+                entry.delete(0, tk.END)
+        else:
+            messagebox.showerror("Erro", message)
+
+    def create_agendar_consulta_frame(self):
+        self.show_content_frame("Agendar Nova Consulta")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=3)
+
+        # Paciente Dropdown
+        ctk.CTkLabel(content_frame, text="Paciente:", font=("Arial", 14), text_color="white", anchor="w").grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        
+        self.pacientes_data = get_pacientes_for_dropdown()
+        # Formato: "Nome do Paciente (CPF: XXX.XXX.XXX-XX)"
+        paciente_display_options = [f"{p['nome']} (CPF: {p['cpf']})" for p in self.pacientes_data]
+        
+        self.selected_paciente = ctk.StringVar(value="Selecione um paciente")
+        self.paciente_dropdown = ctk.CTkOptionMenu(content_frame, values=paciente_display_options,
+                                                    variable=self.selected_paciente, width=300,
+                                                    font=("Arial", 12))
+        self.paciente_dropdown.grid(row=0, column=1, padx=20, pady=10, sticky="ew")
+
+        # Médico Dropdown
+        ctk.CTkLabel(content_frame, text="Médico:", font=("Arial", 14), text_color="white", anchor="w").grid(row=1, column=0, padx=20, pady=10, sticky="w")
+        
+        self.medicos_data = get_medicos_for_dropdown()
+        # Formato: "Nome do Médico (Especialidade) - CRM: XXXXXX"
+        medico_display_options = [f"{m['nome']} ({m['especialidade']}) - CRM: {m['crm']}" for m in self.medicos_data]
+        
+        self.selected_medico = ctk.StringVar(value="Selecione um médico")
+        self.medico_dropdown = ctk.CTkOptionMenu(content_frame, values=medico_display_options,
+                                                  variable=self.selected_medico, width=300,
+                                                  font=("Arial", 12))
+        self.medico_dropdown.grid(row=1, column=1, padx=20, pady=10, sticky="ew")
+
+        # Data da Consulta
+        ctk.CTkLabel(content_frame, text="Data da Consulta (DD-MM-AAAA ou DD/MM/AAAA):", font=("Arial", 14), text_color="white", anchor="w").grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        self.entry_data_consulta = ctk.CTkEntry(content_frame, width=300, placeholder_text="Ex: 25-12-2024", font=("Arial", 12))
+        self.entry_data_consulta.grid(row=2, column=1, padx=20, pady=10, sticky="ew")
+
+        # Horário da Consulta
+        ctk.CTkLabel(content_frame, text="Horário da Consulta (HH:MM):", font=("Arial", 14), text_color="white", anchor="w").grid(row=3, column=0, padx=20, pady=10, sticky="w")
+        self.entry_horario_consulta = ctk.CTkEntry(content_frame, width=300, placeholder_text="Ex: 14:30", font=("Arial", 12))
+        self.entry_horario_consulta.grid(row=3, column=1, padx=20, pady=10, sticky="ew")
+
+        # Botão Agendar
+        agendar_button = ctk.CTkButton(content_frame, text="Agendar Consulta", command=self._agendar_consulta_action,
+                                       font=("Arial", 16, "bold"), fg_color="#4CAF50", hover_color="#45a049")
+        agendar_button.grid(row=4, column=0, columnspan=2, pady=20, padx=20)
+
+    def _agendar_consulta_action(self):
+        selected_paciente_display = self.selected_paciente.get()
+        selected_medico_display = self.selected_medico.get()
+        data_consulta_str = self.entry_data_consulta.get()
+        horario_consulta_str = self.entry_horario_consulta.get()
+
+        # Extrair id_paciente
+        id_paciente = None
+        for p in self.pacientes_data:
+            if f"{p['nome']} (CPF: {p['cpf']})" == selected_paciente_display:
+                id_paciente = p['id_paciente']
+                break
+        
+        # Extrair id_medico
+        id_medico = None
+        for m in self.medicos_data:
+            if f"{m['nome']} ({m['especialidade']}) - CRM: {m['crm']}" == selected_medico_display:
+                id_medico = m['id_medico']
+                break
+
+        if id_paciente is None or id_medico is None:
+            messagebox.showerror("Erro de Seleção", "Por favor, selecione um paciente e um médico válidos.")
+            return
+
+        success, message = agendar_consulta_db(id_paciente, id_medico, data_consulta_str, horario_consulta_str)
+        if success:
+            messagebox.showinfo("Sucesso", message)
+            # Limpar campos após o agendamento
+            self.selected_paciente.set("Selecione um paciente")
+            self.selected_medico.set("Selecione um médico")
+            self.entry_data_consulta.delete(0, tk.END)
+            self.entry_horario_consulta.delete(0, tk.END)
+        else:
+            messagebox.showerror("Erro", message)
+
+    def create_listar_agendamentos_frame(self):
+        self.show_content_frame("Listagem de Agendamentos")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="transparent")
+        content_frame.pack(expand=True, fill="both", padx=0, pady=0)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_rowconfigure(0, weight=1)
+
+        # Usar um CTkTextbox para exibir os agendamentos formatados
+        self.agendamentos_display_box = ctk.CTkTextbox(content_frame, wrap="word", font=("Arial", 12),
+                                                       text_color="white", fg_color="#1a2d52",
+                                                       border_width=1, border_color="#3a4c6d")
+        self.agendamentos_display_box.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.agendamentos_display_box.configure(state="disabled") # Torna o textbox somente leitura
+
+        self._update_agendamentos_display()
+
+    def _update_agendamentos_display(self):
+        self.agendamentos_display_box.configure(state="normal")
+        self.agendamentos_display_box.delete("1.0", tk.END)
+
+        success, result = listar_agendamentos_db()
+        if success:
+            if result:
+                display_text = "Agendamentos Atuais:\n\n"
+                for agendamento in result:
+                    data_formatada = agendamento['data_consulta'].strftime('%d/%m/%Y')
+                    display_text += (
+                        f"ID: {agendamento['id_consulta']}\n"
+                        f"Paciente: {agendamento['nome_paciente']}\n"
+                        f"Médico: {agendamento['nome_medico']} ({agendamento['especialidade']})\n"
+                        f"Data: {data_formatada}\n"
+                        f"Horário: {agendamento['horario_consulta']}\n"
+                        f"Tipo de Procedimento: {agendamento['tipo_procedimento']}\n"
+                        f"{'-'*50}\n"
+                    )
+                self.agendamentos_display_box.insert("1.0", display_text)
+            else:
+                self.agendamentos_display_box.insert("1.0", "Nenhum agendamento encontrado.")
+        else:
+            self.agendamentos_display_box.insert("1.0", f"Erro ao carregar agendamentos: {result}")
+        
+        self.agendamentos_display_box.configure(state="disabled")
+
+    def create_cancelar_agendamento_frame(self):
+        self.show_content_frame("Cancelar Agendamento")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=2)
+        content_frame.grid_rowconfigure(2, weight=1) # Make the list display expandable
+
+        ctk.CTkLabel(content_frame, text="ID da Consulta a Cancelar:", font=("Arial", 14), text_color="white", anchor="w").grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        self.entry_cancel_id = ctk.CTkEntry(content_frame, width=200, placeholder_text="Digite o ID", font=("Arial", 12))
+        self.entry_cancel_id.grid(row=0, column=1, padx=20, pady=10, sticky="ew")
+
+        cancel_button = ctk.CTkButton(content_frame, text="Confirmar Cancelamento", command=self._cancelar_agendamento_action,
+                                      font=("Arial", 16, "bold"), fg_color="#d32f2f", hover_color="#b71c1c")
+        cancel_button.grid(row=1, column=0, columnspan=2, pady=20, padx=20)
+
+        ctk.CTkLabel(content_frame, text="Agendamentos Atuais para Referência:", font=("Arial", 14, "bold"), text_color="white", anchor="w").grid(row=2, column=0, columnspan=2, padx=20, pady=(20, 10), sticky="w")
+
+        self.cancel_list_display_box = ctk.CTkTextbox(content_frame, wrap="word", font=("Arial", 12),
+                                                      text_color="white", fg_color="#0d1421",
+                                                      border_width=1, border_color="#3a4c6d", height=200)
+        self.cancel_list_display_box.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=10)
+        self.cancel_list_display_box.configure(state="disabled")
+
+        self._update_cancel_list_display()
+
+    def _cancelar_agendamento_action(self):
+        id_consulta = self.entry_cancel_id.get()
+        success, message = cancelar_agendamento_db(id_consulta)
+        if success:
+            messagebox.showinfo("Sucesso", message)
+            self.entry_cancel_id.delete(0, tk.END)
+            self._update_cancel_list_display() # Atualiza a lista após o cancelamento
+        else:
+            messagebox.showerror("Erro", message)
+
+    def _update_cancel_list_display(self):
+        self.cancel_list_display_box.configure(state="normal")
+        self.cancel_list_display_box.delete("1.0", tk.END)
+
+        success, result = listar_agendamentos_db()
+        if success:
+            if result:
+                display_text = ""
+                for agendamento in result:
+                    data_formatada = agendamento['data_consulta'].strftime('%d/%m/%Y')
+                    display_text += (
+                        f"ID: {agendamento['id_consulta']} - Paciente: {agendamento['nome_paciente']} - Médico: {agendamento['nome_medico']}\n"
+                        f"   Data: {data_formatada} Horário: {agendamento['horario_consulta']} - Tipo: {agendamento['tipo_procedimento']}\n"
+                        f"{'-'*50}\n"
+                    )
+                self.cancel_list_display_box.insert("1.0", display_text)
+            else:
+                self.cancel_list_display_box.insert("1.0", "Nenhum agendamento ativo encontrado.")
+        else:
+            self.cancel_list_display_box.insert("1.0", f"Erro ao carregar agendamentos: {result}")
+        
+        self.cancel_list_display_box.configure(state="disabled")
+
+    def create_movimentacao_pacientes_frame(self):
+        self.show_content_frame("Movimentação de Pacientes")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        ctk.CTkLabel(content_frame, text="Funcionalidade em desenvolvimento. Em breve, acompanhamento de internações, altas e transferências.",
+                     font=("Arial", 16), text_color="white", wraplength=500, justify="center").pack(pady=50)
+
+    def create_prontuario_eletronico_frame(self):
+        self.show_content_frame("Prontuário Eletrônico")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=2)
+        content_frame.grid_rowconfigure(2, weight=1) # Make the display box expandable
+
+        # Patient selection
+        ctk.CTkLabel(content_frame, text="Selecione o Paciente:", font=("Arial", 14), text_color="white", anchor="w").grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        self.prontuario_pacientes_data = get_pacientes_for_dropdown()
+        prontuario_paciente_options = [f"{p['nome']} (CPF: {p['cpf']})" for p in self.prontuario_pacientes_data]
+        self.selected_prontuario_paciente = ctk.StringVar(value="Selecione um paciente")
+        self.prontuario_paciente_dropdown = ctk.CTkOptionMenu(content_frame, values=prontuario_paciente_options,
+                                                               variable=self.selected_prontuario_paciente, width=300,
+                                                               font=("Arial", 12))
+        self.prontuario_paciente_dropdown.grid(row=0, column=1, padx=20, pady=10, sticky="ew")
+
+        # Load Prontuário Button
+        load_button = ctk.CTkButton(content_frame, text="Carregar Prontuário", command=self._carregar_prontuario_action,
+                                    font=("Arial", 16, "bold"), fg_color="#007bff", hover_color="#0056b3")
+        load_button.grid(row=1, column=0, columnspan=2, pady=20, padx=20)
+
+        # Prontuário Display Area
+        self.prontuario_display_box = ctk.CTkTextbox(content_frame, wrap="word", font=("Arial", 12),
+                                                     text_color="white", fg_color="#0d1421",
+                                                     border_width=1, border_color="#3a4c6d", height=400)
+        self.prontuario_display_box.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=20, pady=10)
+        self.prontuario_display_box.configure(state="disabled")
+
+    def _carregar_prontuario_action(self):
+        selected_paciente_display = self.selected_prontuario_paciente.get()
+        if selected_paciente_display == "Selecione um paciente":
+            self._update_prontuario_display("Por favor, selecione um paciente para carregar o prontuário.")
+            return
+
+        id_paciente = None
+        for p in self.prontuario_pacientes_data:
+            if f"{p['nome']} (CPF: {p['cpf']})" == selected_paciente_display:
+                id_paciente = p['id_paciente']
+                break
+
+        if id_paciente is None:
+            self._update_prontuario_display("Erro: Paciente não encontrado.")
+            return
+
+        paciente_details = get_paciente_details_db(id_paciente)
+        if not paciente_details:
+            self._update_prontuario_display("Não foi possível carregar detalhes do paciente.")
+            return
+        
+        prontuario_text = f"--- PRONTUÁRIO ELETRÔNICO ---\n\n"
+        prontuario_text += f"Paciente: {paciente_details['nome']}\n"
+        prontuario_text += f"CPF: {paciente_details['cpf']}\n"
+        prontuario_text += f"Data de Nascimento: {paciente_details['data_nascimento'].strftime('%d/%m/%Y')}\n\n"
+
+        success_consultas, consultas = get_paciente_consultas_db(id_paciente)
+        if success_consultas and consultas:
+            prontuario_text += "HISTÓRICO DE CONSULTAS/PROCEDIMENTOS:\n"
+            for consulta in consultas:
+                data_consulta_obj = consulta['data_consulta'] # Já é um objeto date
+                # Simular detalhes da consulta usando a data da consulta real
+                detalhes_simulados = simular_detalhes_consulta(consulta['tipo_procedimento'], data_consulta_obj)
+                
+                prontuario_text += f"\n--- Consulta ID: {consulta['id_consulta']} ---\n"
+                prontuario_text += f"Data: {data_consulta_obj.strftime('%d/%m/%Y')} - Horário: {consulta['horario_consulta']}\n"
+                prontuario_text += f"Médico: {consulta['nome_medico']} (Especialidade: {consulta['especialidade']})\n"
+                prontuario_text += f"Motivo/Procedimento: {detalhes_simulados['motivo']}\n"
+                prontuario_text += f"Tipo de Procedimento Registrado: {consulta['tipo_procedimento']}\n"
+                prontuario_text += f"Procedimento Principal Simulada: {detalhes_simulados['procedimento']}\n"
+                prontuario_text += f"Data de Internação (Simulada): {detalhes_simulados['data_internacao']}\n"
+                prontuario_text += f"Data do Procedimento (Simulada): {detalhes_simulados['data_procedimento']}\n"
+                prontuario_text += f"Data de Alta (Simulada): {detalhes_simulados['alta']}\n"
+                
+                prontuario_text += "\nAcontecimentos:\n"
+                if detalhes_simulados['acontecimentos']:
+                    for acontecimento in detalhes_simulados['acontecimentos']:
+                        prontuario_text += f"  - {acontecimento}\n"
+                else:
+                    prontuario_text += "  Nenhum acontecimento detalhado simulado para esta consulta.\n"
+                
+                prontuario_text += "\nMedicamentos Usados (Simulados):\n"
+                if detalhes_simulados['medicamentos_usados']:
+                    prontuario_text += "  " + ", ".join(detalhes_simulados['medicamentos_usados']) + "\n"
+                else:
+                    prontuario_text += "  Nenhum medicamento simulado para esta consulta.\n"
+
+                prontuario_text += f"{'='*60}\n"
+        else:
+            prontuario_text += f"Nenhum histórico de consultas encontrado para este paciente. {consultas if not success_consultas else ''}\n"
+
+        self._update_prontuario_display(prontuario_text)
+
+    def _update_prontuario_display(self, text):
+        self.prontuario_display_box.configure(state="normal")
+        self.prontuario_display_box.delete("1.0", tk.END)
+        self.prontuario_display_box.insert("1.0", text)
+        self.prontuario_display_box.configure(state="disabled")
+
+    def create_relatorios_frame(self):
+        self.show_content_frame("Relatórios")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        ctk.CTkLabel(content_frame, text="Funcionalidade em desenvolvimento. Em breve, relatórios de agendamentos, pacientes e performance.",
+                     font=("Arial", 16), text_color="white", wraplength=500, justify="center").pack(pady=50)
+
+    def create_configuracoes_frame(self):
+        self.show_content_frame("Configurações")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        ctk.CTkLabel(content_frame, text="Funcionalidade em desenvolvimento. Em breve, opções de configuração do sistema.",
+                     font=("Arial", 16), text_color="white", wraplength=500, justify="center").pack(pady=50)
+
+    def create_logs_sistema_frame(self):
+        self.show_content_frame("Logs do Sistema")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        ctk.CTkLabel(content_frame, text="Funcionalidade em desenvolvimento. Em breve, visualização dos logs de atividades do sistema.",
+                     font=("Arial", 16), text_color="white", wraplength=500, justify="center").pack(pady=50)
+
+    def create_cadastrar_medico_frame(self):
+        self.show_content_frame("Cadastro de Médico")
+        content_frame = ctk.CTkFrame(self.content_area_frame, fg_color="#1a2d52", corner_radius=10)
+        content_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=3) # Larger column for entry fields
+
+        form_fields_medico = [
+            ("Nome Completo:", "entry_nome_medico", ""),
+            ("Especialidade:", "entry_especialidade", ""),
+            ("Telefone (DDD)XXXX-XXXX:", "entry_telefone_medico", ""),
+            ("E-mail:", "entry_email_medico", ""),
+        ]
+
+        self.medico_entries = {}
+        for i, (label_text, var_name, placeholder) in enumerate(form_fields_medico):
+            ctk.CTkLabel(content_frame, text=label_text, font=("Arial", 14), text_color="white", anchor="w").grid(row=i, column=0, padx=20, pady=10, sticky="w")
+            entry = ctk.CTkEntry(content_frame, width=300, placeholder_text=placeholder, font=("Arial", 12))
+            entry.grid(row=i, column=1, padx=20, pady=10, sticky="ew")
+            self.medico_entries[var_name] = entry
+        
+        # Adiciona um botão para cadastrar
+        cadastrar_button = ctk.CTkButton(content_frame, text="Cadastrar Médico", command=self._cadastrar_medico_action,
+                                        font=("Arial", 16, "bold"), fg_color="#4CAF50", hover_color="#45a049")
+        cadastrar_button.grid(row=len(form_fields_medico), column=0, columnspan=2, pady=20, padx=20)
+
+    def _cadastrar_medico_action(self):
+        nome = self.medico_entries["entry_nome_medico"].get()
+        especialidade = self.medico_entries["entry_especialidade"].get()
+        telefone = self.medico_entries["entry_telefone_medico"].get()
+        email = self.medico_entries["entry_email_medico"].get()
+
+        if not nome or not especialidade or not telefone or not email:
+            messagebox.showerror("Erro de Cadastro", "Por favor, preencha todos os campos.")
+            return
+        
+        if not (telefone.isdigit() and 10 <= len(telefone) <= 11):
+            messagebox.showerror("Erro de Cadastro", "Telefone inválido. Digite apenas números (10 ou 11 dígitos, incluindo DDD).")
+            return
+        
+        if not validar_email(email):
+            messagebox.showerror("Erro de Cadastro", 'E-mail incorreto. Apenas domínios hotmail.com, gmail.com, icloud.com ou itc.com são aceitos.')
+            return
+
+        crm = generate_crm() # Gera um CRM aleatório
+
+        conn = get_db_connection()
+        if conn is None:
+            messagebox.showerror("Erro de Conexão", "Não foi possível conectar ao banco de dados.")
+            return
+
+        try:
+            cursor = conn.cursor()
+            # Verificar se o CRM já existe (embora seja aleatório, é bom verificar)
+            cursor.execute("SELECT crm FROM medicos WHERE crm = %s", (crm,))
+            while cursor.fetchone(): # Se existir, gera um novo até que seja único
+                crm = generate_crm()
+                cursor.execute("SELECT crm FROM medicos WHERE crm = %s", (crm,))
+
+            sql = """
+                INSERT INTO medicos (nome, especialidade, telefone, email, crm)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql, (nome, especialidade, telefone, email, crm))
+            conn.commit()
+            messagebox.showinfo("Sucesso", f"Médico {nome} cadastrado com sucesso! CRM: {crm}")
+            # Limpar campos após o cadastro
+            for entry in self.medico_entries.values():
+                entry.delete(0, tk.END)
+
+        except Error as e:
+            messagebox.showerror("Erro ao Salvar", f"Erro ao cadastrar médico no MySQL: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
