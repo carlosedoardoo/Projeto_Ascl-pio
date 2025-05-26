@@ -1,0 +1,6 @@
+Se você tem todos esses arquivos e deseja que eles funcionem corretamente, você deve executar os seguintes comandos no seu terminal (ou prompt de comando) para garantir que todas as bibliotecas necessárias estejam instaladas:
+
+pip install mysql-connector-python
+pip install python-dateutil
+pip install customtkinter
+pip install Pillow
