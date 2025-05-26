@@ -1,0 +1,50 @@
+def get_db_connection():
+def validar_cpf(cpf):
+def validar_email(email):
+def cadastrar_paciente_db(nome, telefone, data_nasc_str, cpf, email):
+def agendar_consulta_db(id_paciente, id_medico, data_consulta_str, horario_consulta_str):
+def listar_agendamentos_db():
+def cancelar_agendamento_db(id_consulta):
+def get_pacientes_for_dropdown():
+def get_medicos_for_dropdown():
+def get_paciente_details_db(id_paciente):
+def get_paciente_consultas_db(id_paciente):
+def get_ultima_consulta_db(id_paciente):
+def generate_crm():
+def simular_detalhes_consulta(tipo_procedimento, data_consulta):
+
+class App(ctk.CTk):
+    def __init__(self):
+    def load_image(self, image_name, size):
+    def clear_frame(self, frame):
+    def create_login_screen(self):
+    def attempt_login(self):
+    def show_main_menu(self):
+    def create_header(self, username="Usuário"):
+    def confirm_logout(self):
+    def create_dashboard_content(self):
+    def select_tab(self, tab_name):
+    def filter_modules(self, event=None):
+    def create_module_cards_data(self):
+    def show_funcoes_modules(self):
+    def show_utilitarios_modules(self):
+    def clear_modules_frame(self):
+    def create_module_card(self, parent_frame, text, icon_img, command):
+    def show_content_frame(self, title):
+    def create_cadastrar_paciente_frame(self):
+    def _cadastrar_paciente_action(self):
+    def create_agendar_consulta_frame(self):
+    def _agendar_consulta_action(self):
+    def create_listar_agendamentos_frame(self):
+    def create_cancelar_agendamento_frame(self):
+    def _cancelar_agendamento_action(self):
+    def _update_cancel_list_display(self):
+    def create_movimentacao_pacientes_frame(self):
+    def create_prontuario_eletronico_frame(self):
+    def _carregar_prontuario_action(self):
+    def _update_prontuario_display(self, text):
+    def create_relatorios_frame(self):
+    def create_configuracoes_frame(self):
+    def create_logs_sistema_frame(self):
+    def create_cadastrar_medico_frame(self):
+    def _cadastrar_medico_action(self):
